@@ -1,0 +1,9 @@
+services:
+  telegram-news-bot:
+    build: .
+    container_name: telegram-news-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
