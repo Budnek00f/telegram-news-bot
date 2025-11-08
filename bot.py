@@ -33,18 +33,19 @@ class TelegramNewsBot:
             raise
         
     def send_news_to_channel(self, news_text, image_url=None):
-        """Отправляет новость в канал"""
+        """Отправляет новость в канал с изображением"""
         try:
             logger.info(f"📤 Отправка новости в канал {self.channel_id}...")
             
-            # Если есть изображение и оно локальное (не внешняя ссылка), пробуем отправить
-            if image_url and self._is_local_image(image_url):
-                logger.info(f"🖼️ Попытка отправить с локальным изображением")
+            if image_url:
+                logger.info(f"🖼️ Попытка отправить с изображением: {image_url}")
                 success = self._send_photo_with_caption(news_text, image_url)
                 if success:
                     return True
+                else:
+                    logger.warning("⚠️ Не удалось отправить с изображением, пробуем без него")
             
-            # Всегда отправляем текстовую версию (надежнее)
+            # Если изображение недоступно, отправляем только текст
             logger.info("📝 Отправка текстовой новости...")
             return self._send_text_message(news_text)
                 
@@ -52,26 +53,33 @@ class TelegramNewsBot:
             logger.error(f"❌ Ошибка при отправке сообщения: {e}")
             return False
 
-    def _is_local_image(self, image_url):
-        """Проверяет, является ли изображение локальным файлом"""
-        return image_url and not image_url.startswith(('http://', 'https://'))
-
-    def _send_photo_with_caption(self, caption, image_path):
+    def _send_photo_with_caption(self, caption, image_url):
         """Отправляет фото с подписью"""
         try:
-            if not os.path.exists(image_path):
+            # Скачиваем изображение
+            response = requests.get(image_url, timeout=15)
+            if response.status_code != 200:
                 return False
-                
+            
+            # Сохраняем временно и отправляем
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+                temp_file.write(response.content)
+                temp_file_path = temp_file.name
+            
+            # Отправляем через multipart/form-data
             url = f"{self.base_url}/sendPhoto"
-            files = {'photo': open(image_path, 'rb')}
+            files = {'photo': open(temp_file_path, 'rb')}
             data = {
                 'chat_id': self.channel_id,
-                'caption': caption[:1024],
+                'caption': caption[:1024],  # Ограничение Telegram
                 'parse_mode': 'HTML'
             }
             
             response = requests.post(url, files=files, data=data, timeout=30)
             result = response.json()
+            
+            # Удаляем временный файл
+            os.unlink(temp_file_path)
             
             if result.get('ok'):
                 logger.info("✅ Новость с изображением отправлена в канал")
@@ -90,7 +98,7 @@ class TelegramNewsBot:
             url = f"{self.base_url}/sendMessage"
             payload = {
                 "chat_id": self.channel_id,
-                "text": text[:4096],
+                "text": text[:4096],  # Ограничение Telegram
                 "parse_mode": "HTML",
                 "disable_web_page_preview": False
             }

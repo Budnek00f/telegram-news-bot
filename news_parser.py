@@ -3,22 +3,25 @@ import logging
 import requests
 import feedparser
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 import re
 from bs4 import BeautifulSoup
 import time
-import pytz
 
 logger = logging.getLogger(__name__)
 
 class NewsParser:
     def __init__(self):
         self.news_sources = [
-            # IT-новости на русском
             {
-                'name': 'VC.ru IT',
+                'name': 'Habr',
+                'url': 'https://habr.com/ru/rss/articles/?fl=ru',
+                'category': 'development'
+            },
+            {
+                'name': 'VC.ru Tech',
                 'url': 'https://vc.ru/rss/new',
-                'category': 'it'
+                'category': 'tech'
             },
             {
                 'name': 'TJournal Tech',
@@ -26,36 +29,27 @@ class NewsParser:
                 'category': 'tech'
             },
             {
-                'name': 'Habr',
-                'url': 'https://habr.com/ru/rss/articles/?fl=ru',
-                'category': 'development'
-            },
-            {
-                'name': 'IXBT',
+                'name': 'IXBT News',
                 'url': 'https://www.ixbt.com/export/news.rss',
-                'category': 'tech'
-            },
-            {
-                'name': 'CNews',
-                'url': 'https://www.cnews.ru/inc/rss/news.xml',
-                'category': 'it'
+                'category': 'hardware'
             }
         ]
         
-        # Ключевые слова для фильтрации IT-новостей
-        self.it_keywords = [
-            'искусственный интеллект', 'AI', 'машинное обучение', 'нейросеть',
-            'программирование', 'разработка', 'IT', 'технологии', 'софт',
-            'кибербезопасность', 'хакер', 'вирус', 'защита данных',
-            'облако', 'cloud', 'DevOps', 'база данных', 'SQL', 'NoSQL',
-            'мобильное приложение', 'iOS', 'Android', 'React', 'Vue',
-            'блокчейн', 'криптовалюта', 'биткоин', 'NFT',
-            'игры', 'геймдев', 'Unity', 'Unreal Engine',
-            'аналитика', 'Big Data', 'data science', 'ML',
-            'интернет вещей', 'IoT', 'умный дом', 'автоматизация',
-            'стартап', 'инвестиции', 'венчур', 'техстартап',
-            'Microsoft', 'Google', 'Apple', 'Amazon', 'Meta',
-            'Python', 'JavaScript', 'Java', 'C++', 'Go', 'Rust'
+        self.strict_it_keywords = [
+            'программирование', 'разработка', 'код', 'алгоритм', 'фреймворк',
+            'Python', 'JavaScript', 'Java', 'C++', 'C#', 'Go', 'Rust', 'PHP',
+            'React', 'Vue', 'Angular', 'Node.js', 'Django', 'Flask',
+            'Git', 'GitHub', 'GitLab', 'Docker', 'Kubernetes',
+            'искусственный интеллект', 'AI', 'машинное обучение', 'ML',
+            'нейросеть', 'нейросети', 'deep learning', 'data science',
+            'аналитика данных', 'Big Data', 'база данных', 'SQL', 'NoSQL',
+            'кибербезопасность', 'безопасность', 'хакер', 'вирус',
+            'защита данных', 'шифрование', 'VPN', 'firewall',
+            'облако', 'cloud', 'DevOps', 'микросервисы', 'API',
+            'мобильное приложение', 'iOS', 'Android', 'React Native', 'Flutter',
+            'веб-разработка', 'frontend', 'backend', 'fullstack', 'HTML', 'CSS',
+            'блокчейн', 'криптовалюта', 'биткоин', 'Ethereum', 'NFT', 'Web3',
+            'геймдев', 'игровой движок', 'Unity', 'Unreal Engine', 'VR', 'AR'
         ]
         
         logger.info("✅ NewsParser инициализирован")
@@ -67,20 +61,24 @@ class NewsParser:
             feed = feedparser.parse(source['url'])
             
             news_items = []
-            for entry in feed.entries[:15]:  # Берем последние 15 новостей
-                # Проверяем, что новость свежая (не старше 7 дней)
-                published_time = self._parse_date(entry.get('published', ''))
+            for entry in feed.entries[:20]:
+                published_time = self._parse_date(entry)
                 if not self._is_recent(published_time):
                     continue
                 
-                # Проверяем, что новость относится к IT
                 title = entry.get('title', '')
                 summary = entry.get('summary', '')
-                if self._is_it_news(title + ' ' + summary):
+                full_text = title + ' ' + summary
+                
+                if self._is_strict_it_news(full_text):
+                    # Получаем полный текст
+                    full_content = self._get_full_content(entry, source)
+                    
                     news_item = {
-                        'title': title,
+                        'title': self._clean_title(title),
                         'link': entry.link,
-                        'summary': summary,
+                        'summary': self._shorten_summary(summary, 300),  # Более длинное описание
+                        'full_text': full_content,
                         'published': published_time,
                         'source': source['name'],
                         'image': self._extract_image(entry)
@@ -94,55 +92,94 @@ class NewsParser:
             logger.error(f"❌ Ошибка парсинга {source['name']}: {e}")
             return []
 
-    def _parse_date(self, date_str):
-        """Парсит дату из различных форматов"""
+    def _get_full_content(self, entry, source):
+        """Получает полный текст новости"""
         try:
-            if not date_str:
-                return datetime.now(pytz.UTC)
+            # Используем контент из RSS если доступен
+            if hasattr(entry, 'content') and entry.content:
+                full_text = ''
+                for content in entry.content:
+                    if hasattr(content, 'value'):
+                        soup = BeautifulSoup(content.value, 'html.parser')
+                        text = soup.get_text()
+                        full_text += text + '\n\n'
+                return self._clean_text(full_text.strip())
             
-            # Пробуем разные форматы дат
-            try:
-                # Стандартный формат RSS
-                parsed_date = feedparser._parse_date(date_str)
-                if parsed_date:
-                    return parsed_date
-            except:
-                pass
+            # Или используем summary как полный текст
+            summary = entry.get('summary', '')
+            if summary:
+                return self._clean_text(summary)
             
-            # Если не получилось, возвращаем текущую дату
-            return datetime.now(pytz.UTC)
+            return entry.get('title', '')
             
         except Exception as e:
-            logger.warning(f"⚠️ Ошибка парсинга даты '{date_str}': {e}")
-            return datetime.now(pytz.UTC)
+            logger.warning(f"⚠️ Не удалось получить полный текст: {e}")
+            return entry.get('summary', entry.get('title', ''))
+
+    def _clean_text(self, text):
+        """Очищает текст от HTML и лишних пробелов"""
+        if not text:
+            return ""
+        
+        clean_text = re.sub('<[^<]+?>', '', text)
+        clean_text = clean_text.replace('&nbsp;', ' ').replace('&quot;', '"')
+        clean_text = clean_text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+        
+        return clean_text
+
+    def _parse_date(self, entry):
+        """Парсит дату из RSS записи"""
+        try:
+            if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                return datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+            return datetime.now(timezone.utc)
+        except Exception:
+            return datetime.now(timezone.utc)
 
     def _is_recent(self, date_obj):
-        """Проверяет, что новость свежая (не старше 7 дней)"""
+        """Проверяет, что новость свежая"""
         if not date_obj:
             return True
-            
-        now = datetime.now(pytz.UTC)
-        if hasattr(date_obj, 'tzinfo') and date_obj.tzinfo is not None:
-            # Дата с часовым поясом
-            time_diff = now - date_obj
-        else:
-            # Дата без часового пояса
-            time_diff = now - date_obj.replace(tzinfo=pytz.UTC)
-        
-        return time_diff.days <= 7
+        now = datetime.now(timezone.utc)
+        if date_obj.tzinfo is None:
+            date_obj = date_obj.replace(tzinfo=timezone.utc)
+        time_diff = now - date_obj
+        return time_diff.days <= 3  # Увеличили до 3 дней для 30-минутного интервала
 
-    def _is_it_news(self, text):
-        """Проверяет, относится ли новость к IT"""
+    def _is_strict_it_news(self, text):
+        """Строгая проверка на IT-тематику"""
         if not text:
             return False
-            
         text_lower = text.lower()
-        return any(keyword.lower() in text_lower for keyword in self.it_keywords)
+        return any(keyword.lower() in text_lower for keyword in self.strict_it_keywords)
+
+    def _shorten_summary(self, text, max_length=300):
+        """Сокращает текст для описания"""
+        if not text:
+            return "Интересная IT-новость. Нажмите на фото для чтения полной версии."
+        
+        clean_text = self._clean_text(text)
+        
+        if len(clean_text) > max_length:
+            shortened = clean_text[:max_length]
+            last_dot = shortened.rfind('.')
+            if last_dot > max_length * 0.6:
+                return shortened[:last_dot + 1]
+            else:
+                return shortened + '...'
+        
+        return clean_text
+
+    def _clean_title(self, title):
+        """Очищает заголовок"""
+        if not title:
+            return ""
+        return re.sub(r'\s+', ' ', title).strip()
 
     def _extract_image(self, entry):
         """Извлекает изображение из RSS записи"""
         try:
-            # Пробуем разные способы извлечения изображения
             if hasattr(entry, 'media_content') and entry.media_content:
                 for media in entry.media_content:
                     if media.get('type', '').startswith('image/'):
@@ -151,48 +188,28 @@ class NewsParser:
             if hasattr(entry, 'links'):
                 for link in entry.links:
                     if link.get('type', '').startswith('image/'):
-                        return link['href']
+                        return link.get('href')
             
-            # Пробуем извлечь из описания
             if hasattr(entry, 'summary'):
                 soup = BeautifulSoup(entry.summary, 'html.parser')
                 img = soup.find('img')
                 if img and img.get('src'):
                     return img['src']
             
-            # Для Habr - специальная обработка
-            if 'habr.com' in entry.get('link', ''):
-                return self._get_habr_image(entry)
-                
             return None
             
-        except Exception as e:
-            logger.warning(f"⚠️ Ошибка извлечения изображения: {e}")
-            return None
-
-    def _get_habr_image(self, entry):
-        """Получает изображение для Habr статьи"""
-        try:
-            # Habr часто хранит изображения в content
-            if hasattr(entry, 'content'):
-                for content in entry.content:
-                    soup = BeautifulSoup(content.value, 'html.parser')
-                    img = soup.find('img')
-                    if img and img.get('src'):
-                        return img['src']
-            return None
-        except:
+        except Exception:
             return None
 
     def get_random_it_news(self):
-        """Получает случайную IT-новость из всех источников"""
+        """Получает случайную IT-новость"""
         all_news = []
         
         for source in self.news_sources:
             try:
                 news_items = self.fetch_news_from_rss(source)
                 all_news.extend(news_items)
-                time.sleep(0.5)  # Короткая задержка между запросами
+                time.sleep(0.3)
             except Exception as e:
                 logger.error(f"❌ Ошибка при получении новостей из {source['name']}: {e}")
                 continue
@@ -201,59 +218,39 @@ class NewsParser:
             logger.warning("⚠️ Не найдено IT-новостей, используем резервные")
             return self._get_fallback_news()
         
-        # Выбираем случайную новость
         selected_news = random.choice(all_news)
         logger.info(f"🎲 Выбрана новость: {selected_news['title'][:50]}...")
         
         return selected_news
 
     def _get_fallback_news(self):
-        """Резервные новости если парсинг не сработал"""
-        fallback_news = [
-            {
-                'title': 'Искусственный интеллект в разработке ПО',
-                'summary': 'Компании активно внедряют AI для автоматизации тестирования и генерации кода. Новые инструменты позволяют ускорить разработку на 30%.',
-                'link': 'https://habr.com/ru/articles/',
-                'source': 'IT News',
-                'image': None
-            },
-            {
-                'title': 'Кибербезопасность в 2024 году',
-                'summary': 'Эксперты прогнозируют рост атак на облачную инфраструктуру. Компании инвестируют в новые системы защиты данных.',
-                'link': 'https://vc.ru/tech',
-                'source': 'Security Digest',
-                'image': None
-            },
-            {
-                'title': 'Тренды мобильной разработки',
-                'summary': 'Flutter и React Native продолжают доминировать в кроссплатформенной разработке. Растет популярность PWA приложений.',
-                'link': 'https://tjournal.ru/tech',
-                'source': 'Mobile World',
-                'image': None
-            }
-        ]
+        """Резервные новости"""
+        fallback_news = {
+            'title': 'Новости IT индустрии',
+            'summary': 'Актуальные новости из мира технологий и программирования.',
+            'full_text': 'В мире IT постоянно происходят интересные события. Следите за обновлениями, чтобы быть в курсе последних тенденций в разработке, искусственном интеллекте и технологиях.',
+            'link': 'https://t.me/deeploy_online',
+            'source': 'IT News',
+            'image': None
+        }
         
-        return random.choice(fallback_news)
+        return fallback_news
 
     def format_news_for_telegram(self, news_item):
-        """Форматирует новость для Telegram"""
+        """Форматирует полную новость для Telegram"""
         title = news_item['title']
         summary = news_item['summary']
         source = news_item['source']
         link = news_item['link']
         
-        # Очищаем текст от HTML тегов
-        clean_summary = re.sub('<[^<]+?>', '', summary)
-        clean_summary = clean_summary.replace('&nbsp;', ' ').replace('&quot;', '"')
-        clean_summary = clean_summary[:400] + '...' if len(clean_summary) > 400 else clean_summary
-        
-        # Создаем форматированный текст
         formatted_text = f"""🚀 <b>{title}</b>
 
-{clean_summary}
+{summary}
 
 📰 <i>Источник: {source}</i>
 🔗 <a href="{link}">Читать подробнее</a>
+
+💫 <i>При нажатии на фото можно открыть его в полном размере</i>
 
 #ITновости #Технологии #Разработка"""
         
@@ -261,31 +258,8 @@ class NewsParser:
 
     def get_news_image(self, news_item):
         """Возвращает изображение для новости"""
-        # Сначала пробуем получить изображение из новости
         if news_item.get('image'):
-            # Проверяем, что URL валидный
             image_url = news_item['image']
-            if image_url.startswith(('http://', 'https://')):
+            if image_url and image_url.startswith(('http://', 'https://')):
                 return image_url
-        
-        # Если изображения нет, используем локальные заглушки или тематические
-        image_themes = {
-            'искусственный интеллект': '🤖',
-            'кибербезопасность': '🔐', 
-            'программирование': '💻',
-            'мобильная разработка': '📱',
-            'облако': '☁️',
-            'блокчейн': '⛓️',
-            'аналитика': '📊',
-            'игры': '🎮'
-        }
-        
-        # Ищем тему по ключевым словам
-        text = (news_item['title'] + ' ' + news_item['summary']).lower()
-        for theme, emoji in image_themes.items():
-            if theme in text:
-                # Используем эмодзи как "изображение" - None означает без картинки
-                return None
-                
-        # Если не нашли тему, без изображения
         return None
